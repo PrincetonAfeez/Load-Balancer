@@ -1,0 +1,33 @@
+[listener]
+host = "127.0.0.1"
+port = 8081
+
+[balancer]
+strategy = "round_robin"
+
+[control]
+host = "127.0.0.1"
+port = 9901
+
+[crypto]
+secret_file = "admin.secret"
+
+[metrics]
+database_path = "rule-routing.db"
+
+[rules]
+source = '''
+if client.ip startswith "10." then return "consistent_hash"
+else return "least_connections"
+'''
+
+[[backends]]
+name = "one"
+host = "127.0.0.1"
+port = 9001
+
+[[backends]]
+name = "two"
+host = "127.0.0.1"
+port = 9002
+
