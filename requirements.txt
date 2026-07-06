@@ -1,0 +1,5 @@
+# Runtime dependencies: none.
+# This project uses only the Python 3.11+ standard library.
+#
+# Install from the repository root:
+#   python -m pip install -e .
