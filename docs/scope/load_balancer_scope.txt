@@ -1,0 +1,652 @@
+==============================================================
+LOAD BALANCER (simple) -- PROJECT SCOPE
+Capstone: Systems Programming in Python
+Stack: Python CLI / daemon / SQLite DB
+Optional Web Layer: Django + HTMX only if a dashboard is added
+==============================================================
+
+GOAL
+----
+Build a fully functional learning load balancer that runs as a long-lived
+Python daemon, accepts client TCP connections, selects healthy backends using
+pluggable balancing algorithms, relays bytes bidirectionally, records metrics,
+exposes a CLI/admin control plane, supports graceful drain/reload, and includes
+intentional capstone features for parsing, process control, graph-style
+algorithms, bytecode-style execution, and cryptographic primitives.
+
+This is a serious student capstone, not a production load balancer. It should
+be ambitious, coherent, testable, and honest about its limits.
+
+Concepts genuinely in play:
+  - SYSTEMS THINKING: sockets, byte streams, hot path design, liveness,
+    concurrency, backpressure, timeouts, failure modes
+  - PROCESS CONTROL: long-running daemon, PID file, signals where supported,
+    graceful shutdown, graceful drain, config reload, foreground service mode
+  - PARSING: typed config file parser, CLI command parsing, admin protocol
+    framing, optional routing-rule DSL
+  - GRAPH / HASH-RING ALGORITHMS: consistent hashing with virtual nodes for
+    sticky backend selection
+  - CRYPTOGRAPHIC PRIMITIVES: HMAC-signed admin commands, secure tokens, and
+    optional TLS wrapping with Python's ssl module
+  - BYTECODE / VM THINKING: compile a tiny rule DSL into internal instructions
+    and interpret those instructions for admin/routing/policy decisions
+
+Legend:
+  [CORE] = required for the capstone
+  [STRETCH] = optional polish after the core works end-to-end
+
+
+DESIGN CALLS
+------------
+[CORE]    Layer 4 TCP proxying is the main product. The balancer accepts a
+          client connection, chooses a backend, connects to it, and relays raw
+          bytes in both directions. This keeps the hot path protocol-agnostic.
+
+[CORE]    Layer 7 HTTP routing is optional. If added, it must be a separate
+          mode layered on top of the L4 balancer, not a rewrite of the core.
+
+[CORE]    The DB is for configuration snapshots, metrics, events, and history.
+          It must never be queried on the per-connection hot path. Config is
+          loaded at startup/reload into memory; metrics are written
+          asynchronously or on a controlled interval.
+
+[CORE]    Keep selection logic pure and testable. Given a backend pool and
+          runtime state, a strategy returns a backend. Sockets, DB writes, CLI
+          parsing, and daemon concerns wrap around this clean core.
+
+[CORE]    Use Python's standard library heavily where reasonable: socket,
+          selectors or asyncio, signal, argparse, sqlite3, logging, hmac,
+          hashlib, secrets, ssl, dataclasses, typing, enum, time.monotonic.
+
+
+--------------------------------------------------------------
+1. CORE ARCHITECTURE
+--------------------------------------------------------------
+[CORE]    Clean module boundaries:
+
+            src/load_balancer/
+              __init__.py
+              cli.py              # argparse entrypoint
+              daemon.py           # lifecycle, PID file, signals/control mode
+              proxy.py            # listener + connection relay hot path
+              pool.py             # backend model and pool state
+              strategies.py       # balancing algorithms
+              health.py           # active/passive health checks
+              store.py            # SQLite config/metrics persistence
+              metrics.py          # counters, events, snapshots
+              config_parser.py    # config file parser + validation
+              control.py          # local admin/control socket protocol
+              crypto.py           # HMAC signing/verification helpers
+              rule_dsl.py         # parser/compiler for tiny policy DSL
+              vm.py               # tiny internal bytecode interpreter
+              errors.py
+
+[CORE]    Backend model:
+            - id/name
+            - host
+            - port
+            - weight
+            - state: healthy, unhealthy, draining, disabled
+            - active connection count
+            - total connections handled
+            - bytes in/out
+            - last health-check result
+            - consecutive successes/failures
+            - optional metadata/tags for rules and admin display
+
+[CORE]    Backend pool:
+            - selects only eligible backends
+            - excludes unhealthy, disabled, and draining backends from new
+              traffic
+            - keeps draining backends alive for existing connections
+            - supports atomic replacement during reload without dropping
+              in-flight connections
+
+[CORE]    Concurrency model:
+            - Choose one final model and document the tradeoff.
+            - Recommended: asyncio streams or selectors with nonblocking
+              sockets. Both are strong systems-programming choices.
+            - Thread-per-connection is allowed only if the README explains the
+              scaling tradeoffs and the connection counters are protected.
+
+[CORE]    Runtime architecture:
+            LISTENER -> STRATEGY -> BACKEND CONNECT -> BIDIRECTIONAL RELAY
+            Background: HEALTH CHECKER, METRICS WRITER, CONTROL SOCKET
+            Persistence: CONFIG SNAPSHOTS + METRICS HISTORY
+
+
+--------------------------------------------------------------
+2. BALANCING STRATEGIES
+--------------------------------------------------------------
+[CORE]    Pluggable strategy interface:
+            - name
+            - select(pool, connection_context) -> backend
+            - optional on_success/on_failure hooks for passive feedback
+
+[CORE]    Round-robin:
+            - cycles through healthy eligible backends in stable order
+            - skips unhealthy/draining/disabled backends
+            - does not get stuck when the pool changes during reload
+
+[CORE]    Weighted round-robin:
+            - higher-weight backends receive proportionally more selections
+            - distribution must be tested over a large sample
+
+[CORE]    Least-connections:
+            - selects the healthy backend with the fewest active connections
+            - active counts increment only after backend connection success
+            - counts decrement exactly once on teardown
+            - concurrency-safe under simultaneous connects/closes
+
+[CORE]    Consistent hashing:
+            - implement a hash ring with virtual nodes
+            - route sticky clients by source IP in L4 mode
+            - in optional L7 mode, allow sticky routing by header/cookie/path key
+            - demonstrate that adding/removing a backend minimizes remapping
+            - explain why this is a graph/ring-style distribution algorithm
+
+[STRETCH] Random and weighted-random strategies.
+
+[STRETCH] Strategy plugin loading by import path.
+
+
+--------------------------------------------------------------
+3. TCP PROXY HOT PATH
+--------------------------------------------------------------
+[CORE]    Accept client connections on a configured listener host/port.
+
+[CORE]    Build a connection context:
+            - client address
+            - accepted timestamp from time.monotonic()
+            - requested strategy
+            - optional sticky key
+
+[CORE]    Select a backend through the configured strategy.
+
+[CORE]    Connect to the selected backend with a timeout.
+
+[CORE]    Relay bytes bidirectionally:
+            - client -> backend
+            - backend -> client
+            - continue until either side closes, errors, or times out
+            - handle half-close behavior as cleanly as the chosen socket model
+              allows
+
+[CORE]    Enforce timeouts:
+            - backend connect timeout
+            - idle timeout
+            - graceful shutdown drain timeout
+            - health-check timeout
+
+[CORE]    Backend-connect failure handling:
+            - if the chosen backend fails, try the next eligible backend
+            - avoid infinite retry loops
+            - record failure event
+            - feed passive health-check suspicion
+
+[CORE]    Correct accounting:
+            - active connections
+            - total handled
+            - bytes proxied in both directions
+            - failure counts
+            - per-backend and global counters
+
+[CORE]    Hot path must not:
+            - query SQLite
+            - block on metrics flush
+            - parse config files
+            - call the admin CLI
+
+
+--------------------------------------------------------------
+4. HEALTH CHECKS AND LIVENESS
+--------------------------------------------------------------
+[CORE]    Active health checks:
+            - background task/thread separate from the hot path
+            - monotonic scheduling
+            - TCP connect probe by default
+            - optional HTTP GET /health in L7 mode
+
+[CORE]    Hysteresis:
+            - backend becomes unhealthy after N consecutive failures
+            - backend returns healthy after M consecutive successes
+            - prevents single blips from flapping the backend in/out
+
+[CORE]    Passive health checks:
+            - live connection failures mark a backend suspect
+            - passive failures can accelerate active re-checks
+            - passive checks should not instantly remove a backend unless the
+              configured threshold is met
+
+[CORE]    Health state transitions:
+            - log all transitions
+            - write transition events to SQLite
+            - expose in status output
+
+[CORE]    Draining:
+            - a draining backend receives no new connections
+            - existing proxied connections are allowed to finish
+            - when active count reaches zero, removal can complete safely
+
+
+--------------------------------------------------------------
+5. DAEMON AND PROCESS CONTROL
+--------------------------------------------------------------
+[CORE]    Run modes:
+            - foreground mode for development and Windows compatibility
+            - daemon/service mode where supported
+
+[CORE]    PID file:
+            - write PID on start
+            - refuse duplicate daemon starts when PID is alive
+            - clean up PID file on normal exit
+
+[CORE]    Shutdown:
+            - SIGINT/SIGTERM on Unix-like systems
+            - CLI stop command through control socket on all platforms
+            - stop accepting new connections
+            - mark balancer as draining
+            - wait for in-flight connections up to a configured timeout
+            - force close remaining connections after timeout
+
+[CORE]    Reload:
+            - SIGHUP on Unix-like systems where available
+            - CLI reload command through control socket on all platforms
+            - reload config from file/DB snapshot
+            - apply new backend list, weights, strategy, and health settings
+            - do not drop existing connections
+            - removed backends enter draining state first
+
+[CORE]    Control socket:
+            - local TCP or Unix-domain socket where supported
+            - framed command protocol
+            - commands are authenticated with HMAC
+            - used by CLI for stop, reload, status, drain, enable, disable,
+              add/remove backend, and strategy changes
+
+[STRETCH] systemd unit file and service-management notes.
+
+
+--------------------------------------------------------------
+6. PARSING AND CONFIGURATION
+--------------------------------------------------------------
+[CORE]    Config file:
+            - human-readable format such as TOML
+            - parsed into typed dataclasses
+            - validated with clear errors
+            - supports listener, strategy, backends, health checks, timeouts,
+              metrics, control socket, crypto secret location, and rule DSL
+
+[CORE]    Example config:
+
+            [listener]
+            host = "127.0.0.1"
+            port = 8080
+
+            [balancer]
+            strategy = "least_connections"
+            drain_timeout_seconds = 30
+
+            [health]
+            interval_seconds = 2
+            timeout_seconds = 1
+            failures_to_unhealthy = 3
+            successes_to_healthy = 2
+
+            [[backends]]
+            name = "api-1"
+            host = "127.0.0.1"
+            port = 9001
+            weight = 2
+
+[CORE]    Admin protocol parser:
+            - commands sent as framed messages
+            - include timestamp/nonce to prevent replay
+            - parse command name, arguments, signature, and payload
+            - return structured responses
+
+[CORE]    CLI parser:
+            - argparse subcommands
+            - useful help text
+            - clear errors for invalid backend ids, ports, strategies, etc.
+
+
+--------------------------------------------------------------
+7. BYTECODE / RULE DSL
+--------------------------------------------------------------
+[CORE]    Implement a tiny policy DSL to make bytecode and parsing concrete
+          without overcomplicating the proxy.
+
+[CORE]    DSL use cases:
+            - choose a strategy based on backend tags or client address
+            - deny obvious invalid admin operations
+            - in optional L7 mode, route by host/path/header/cookie
+            - express maintenance policies such as "if backend.tag == canary"
+
+[CORE]    Compiler pipeline:
+            source text -> tokens -> AST -> internal bytecode instructions
+
+[CORE]    VM/interpreter:
+            - stack-based or register-like instruction format
+            - small instruction set, for example:
+                LOAD_FIELD
+                LOAD_CONST
+                EQ
+                STARTSWITH
+                AND
+                OR
+                JUMP_IF_FALSE
+                RETURN
+            - deterministic execution
+            - no eval(), exec(), or arbitrary Python execution
+
+[CORE]    Safety:
+            - rule execution has a max instruction count
+            - unsupported fields fail validation at load time
+            - invalid rules prevent reload and keep the previous good config
+
+[CORE]    Tests:
+            - tokenizer
+            - parser
+            - compiler
+            - VM execution
+            - invalid syntax
+            - reload keeps previous config after bad rule
+
+
+--------------------------------------------------------------
+8. CRYPTOGRAPHIC PRIMITIVES
+--------------------------------------------------------------
+[CORE]    HMAC-authenticated admin commands:
+            - use hmac.compare_digest()
+            - use hashlib.sha256 or stronger
+            - include timestamp and nonce in signed payload
+            - reject expired/replayed commands
+            - store admin secret outside source control
+
+[CORE]    Secure token generation:
+            - use secrets.token_urlsafe() for bootstrap/admin secret creation
+            - never use random for secrets
+
+[CORE]    Crypto module boundaries:
+            - sign(message, secret) -> signature
+            - verify(message, signature, secret) -> bool
+            - generate_secret() -> str
+            - replay cache for recent nonces
+
+[STRETCH] TLS:
+            - optional client-side TLS termination using ssl.SSLContext
+            - optional TLS to backends
+            - self-signed cert workflow for local demo
+            - README must state this is educational TLS, not production PKI
+
+
+--------------------------------------------------------------
+9. PERSISTENCE / SQLITE
+--------------------------------------------------------------
+[CORE]    SQLite stores configuration snapshots:
+            - listener config
+            - backend definitions
+            - active strategy
+            - health-check settings
+            - timeout settings
+            - rule DSL source/compiled version metadata
+
+[CORE]    SQLite stores metrics/history:
+            - backend health-check results
+            - state transitions
+            - connection opened/closed events
+            - bytes proxied snapshots
+            - backend connect failures
+            - reload/shutdown/drain events
+
+[CORE]    DB design:
+            - schema migration/init command
+            - indexes for common status/history queries
+            - clear separation between config tables and metrics tables
+
+[CORE]    Runtime rule:
+            - read DB/config only at startup or reload
+            - write metrics asynchronously or periodically
+            - never block client connection handling on SQLite
+
+
+--------------------------------------------------------------
+10. OBSERVABILITY
+--------------------------------------------------------------
+[CORE]    Structured logs:
+            - startup
+            - config load/reload
+            - accept
+            - backend selection
+            - backend connect failure
+            - health-check result
+            - health state transition
+            - drain start/finish
+            - shutdown start/finish
+            - admin command accepted/rejected
+
+[CORE]    Status output:
+            - listener address
+            - process PID
+            - active strategy
+            - uptime
+            - global active connections
+            - total connections
+            - backend table with state, active, total, bytes, weight, health
+              streaks, and last check time
+
+[CORE]    Metrics snapshots:
+            - periodic snapshot to SQLite
+            - CLI can query recent history
+
+[STRETCH] Local read-only status endpoint.
+
+[STRETCH] Django + HTMX dashboard:
+            - live backend state
+            - active connection counts
+            - health history
+            - drain/enable/disable controls
+            - strategy selector
+            - HTMX polling for status updates
+
+
+--------------------------------------------------------------
+11. CLI / ADMIN INTERFACE
+--------------------------------------------------------------
+[CORE]    CLI executable:
+            load-balancer <command> [options]
+
+[CORE]    Required commands:
+            init-db
+            init-secret
+            start
+            stop
+            reload
+            status
+            backends list
+            backends add
+            backends remove
+            backends enable
+            backends disable
+            backends drain
+            strategy get
+            strategy set
+            metrics summary
+            metrics health-history
+            config validate
+
+[CORE]    CLI behavior:
+            - start can run foreground or daemon/service mode
+            - admin commands talk to control socket
+            - commands are HMAC signed
+            - status is human-readable
+            - optional --json output for automation/tests
+
+[STRETCH] Rich terminal tables.
+
+
+--------------------------------------------------------------
+12. OPTIONAL LAYER 7 HTTP MODE
+--------------------------------------------------------------
+[STRETCH] Parse HTTP request line and headers.
+
+[STRETCH] Balance per request instead of per TCP connection.
+
+[STRETCH] Route by:
+            - Host
+            - path prefix
+            - header
+            - cookie
+
+[STRETCH] Sticky sessions:
+            - consistent hash by cookie/header
+            - set cookie for new clients if configured
+
+[STRETCH] Use the same rule DSL/VM for routing policies.
+
+[STRETCH] If a web admin/dashboard is added, use Django + HTMX.
+
+
+--------------------------------------------------------------
+13. PACKAGING AND PROJECT QUALITY
+--------------------------------------------------------------
+[CORE]    Installable Python project:
+            - pyproject.toml
+            - src/ layout
+            - console_scripts entrypoint
+            - README.md
+            - .gitignore
+            - type hints where practical
+
+[CORE]    Code quality:
+            - dataclasses/enums for domain models
+            - no global mutable backend state without clear ownership
+            - clear error types
+            - small strategy classes/functions
+            - deterministic tests
+            - no eval/exec for rules
+
+[CORE]    README:
+            - architecture diagram
+            - setup instructions
+            - running dummy backends
+            - starting the balancer
+            - CLI examples
+            - health-check explanation
+            - drain/reload explanation
+            - DB hot-path warning
+            - security limitations
+            - platform notes for signals/daemon mode
+
+
+--------------------------------------------------------------
+14. TEST PLAN
+--------------------------------------------------------------
+[CORE]    Unit tests:
+            - config parser accepts valid config
+            - config parser rejects invalid ports/weights/strategies
+            - round-robin order
+            - weighted round-robin distribution
+            - least-connections selection
+            - consistent hash ring lookup
+            - consistent hash minimizes remapping after backend change
+            - unhealthy backends are excluded
+            - draining backends are excluded from new selections
+            - active connection count increments/decrements correctly
+            - health hysteresis transitions after configured thresholds
+            - passive health failure updates suspicion counters
+            - HMAC signing/verifying accepts valid messages
+            - HMAC verification rejects tampered/expired/replayed messages
+            - rule DSL tokenizer/parser/compiler/VM
+
+[CORE]    Integration tests:
+            - start dummy local echo backends
+            - start balancer in foreground test mode
+            - send traffic through balancer and receive echo response
+            - verify distribution across backends
+            - kill one backend and verify it is routed around after health
+              threshold
+            - restart backend and verify it returns after success threshold
+            - drain backend and verify no new connections select it
+            - reload config without dropping existing connection
+            - CLI status reports expected state
+
+[CORE]    Concurrency tests:
+            - many simultaneous clients
+            - least-connections counter correctness
+            - shutdown while connections are active
+            - metrics writer does not block hot path
+
+[STRETCH] Basic load test script with latency and throughput summary.
+
+
+--------------------------------------------------------------
+15. DEMO SCRIPT / SUCCESS CRITERIA
+--------------------------------------------------------------
+[CORE]    A successful capstone demo should show:
+
+            1. Initialize DB and admin secret.
+            2. Start three dummy echo backends.
+            3. Start the load balancer.
+            4. Send multiple client connections through it.
+            5. Show round-robin distribution.
+            6. Switch to weighted round-robin and show changed distribution.
+            7. Switch to least-connections and show active-count behavior.
+            8. Switch to consistent hashing and show sticky client routing.
+            9. Kill one backend.
+           10. Health checks mark it unhealthy after N failures.
+           11. New connections avoid the unhealthy backend.
+           12. Restart the backend.
+           13. Health checks return it to healthy after M successes.
+           14. Drain one backend and show no new traffic goes to it.
+           15. Reload config without dropping an existing connection.
+           16. Run an HMAC-signed admin command.
+           17. Validate and execute a tiny compiled rule.
+           18. Show SQLite metrics/history.
+           19. Shut down gracefully.
+
+[CORE]    "Done" means the balancer works end-to-end from CLI, not just in
+          isolated tests.
+
+
+--------------------------------------------------------------
+16. SAFETY AND REALISM
+--------------------------------------------------------------
+[CORE]    Bind to localhost by default.
+
+[CORE]    Do not present this as internet-ready infrastructure.
+
+[CORE]    README must state limitations:
+            - not hardened against DDoS
+            - no production TLS/PKI unless explicitly implemented and reviewed
+            - no kernel-level tuning
+            - no zero-copy forwarding
+            - no multi-process worker model unless added as stretch
+            - SQLite is for config/metrics, not high-volume telemetry
+
+[CORE]    This project is successful because it demonstrates systems judgment:
+          hot path separation, correct state accounting, failure handling,
+          health/liveness, daemon lifecycle, parsing, crypto primitives, and
+          testable algorithms.
+
+
+--------------------------------------------------------------
+CAPSTONE PRIORITIES
+--------------------------------------------------------------
+The project should remain ambitious. Do not reduce the core to only a toy
+round-robin proxy. The required capstone signal is:
+
+  1. A real L4 TCP proxy with bidirectional byte relay.
+  2. Correct least-connections under concurrency.
+  3. Weighted round-robin and consistent hashing.
+  4. Active and passive health checks with hysteresis.
+  5. Graceful drain, graceful shutdown, and live reload.
+  6. SQLite-backed config snapshots and metrics history, off the hot path.
+  7. HMAC-authenticated control commands.
+  8. A parsed config file and framed admin protocol.
+  9. A tiny DSL compiled to internal bytecode and interpreted safely.
+ 10. A credible CLI and test suite.
+
+Build the full capstone in layers, but keep the final target complete.
+==============================================================
