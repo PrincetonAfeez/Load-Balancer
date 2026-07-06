@@ -1,0 +1,12 @@
+# Editable install plus lint, type-check, and test tooling.
+# Install from the repository root:
+#   python -m pip install -r requirements-dev.txt
+#
+# Equivalent:
+#   python -m pip install -e ".[dev]"
+
+-e .
+mypy>=1.8
+ruff>=0.5
+pytest>=8.0
+pytest-asyncio>=0.24
