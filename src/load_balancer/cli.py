@@ -119,7 +119,8 @@ def build_parser() -> argparse.ArgumentParser:
     backend_help = {
         "remove": (
             "remove a runtime backend",
-            "Remove a backend from the pool; lingering connections drain first.",
+            "Retire a backend, stop new selections, drain active connections, "
+            "and remove it from memory after cleanup.",
         ),
         "enable": (
             "enable a backend for new traffic",
@@ -127,11 +128,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         "disable": (
             "disable a backend from new traffic",
-            "Exclude a backend from new selections without dropping active connections.",
+            "Exclude a backend from new selections; existing connections may finish "
+            "until drain_timeout_seconds, after which lingering connections are "
+            "force-closed.",
         ),
         "drain": (
             "drain a backend gracefully",
-            "Stop selecting a backend for new connections while existing ones finish.",
+            "Stop selecting a backend for new connections; active connections may "
+            "finish until drain_timeout_seconds, after which lingering connections "
+            "are force-closed.",
         ),
     }
     for action, (help_text, description) in backend_help.items():

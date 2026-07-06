@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from contextlib import redirect_stdout
 import io
 from pathlib import Path
@@ -83,6 +84,27 @@ class CliTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as exc:
                 main()
             self.assertEqual(exc.exception.code, 0)
+
+    def test_backends_disable_help_mentions_force_close(self):
+        parser = build_parser()
+        with self.assertRaises(SystemExit) as exc:
+            parser.parse_args(["backends", "disable", "--help"])
+        self.assertEqual(exc.exception.code, 0)
+        backends_parser = next(
+            action.choices["backends"]
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+            and "backends" in action.choices
+        )
+        backend_sub = next(
+            action
+            for action in backends_parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        help_text = backend_sub.choices["disable"].format_help()
+        self.assertIn("drain_timeout_seconds", help_text)
+        self.assertIn("force-closed", help_text)
+        self.assertIn("new selections", help_text)
 
     def test_emit_json_and_backend_list(self):
         out = io.StringIO()

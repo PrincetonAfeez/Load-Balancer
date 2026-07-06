@@ -172,10 +172,15 @@ protocol. Runtime mutations are **not** written back to TOML.
 |---------|-------------|-------------|
 | `backends list` | read-only | List backends and runtime state |
 | `backends add NAME HOST PORT [--weight N] [--tag TAG]` | runtime | Add a backend (`--weight` default `1`; `--tag` repeatable) |
-| `backends remove BACKEND_ID` | runtime | Remove a backend after draining active connections |
+| `backends remove BACKEND_ID` | runtime | Retire a backend, stop new selections, drain active connections, and remove it from memory after cleanup |
 | `backends enable BACKEND_ID` | runtime | Mark a backend eligible for new traffic |
-| `backends disable BACKEND_ID` | runtime | Exclude a backend from new selections |
-| `backends drain BACKEND_ID` | runtime | Stop selecting a backend while existing connections finish |
+| `backends disable BACKEND_ID` | runtime | Exclude a backend from new selections. Existing connections may finish until `drain_timeout_seconds`; lingering connections are then force-closed |
+| `backends drain BACKEND_ID` | runtime | Stop selecting a backend for new connections. Active connections may finish until `drain_timeout_seconds`; lingering connections are then force-closed |
+
+`backends drain` marks the backend draining and applies the connection deadline.
+`backends disable` marks the backend disabled and applies the same deadline.
+`backends remove` retires the backend, drains active connections, and drops it
+from memory after cleanup completes.
 
 ### Strategy
 
@@ -364,6 +369,9 @@ Programs compile to instructions such as `LOAD_FIELD`, `LOAD_CONST`, `EQ`,
 instruction limit is configurable and is enforced at config-load time: a
 rule that would compile beyond the limit is rejected during validation/reload,
 not left to fail at runtime.
+
+Maintainer-facing token, AST, and bytecode structure notes live in
+[docs/rule-dsl-schema.md](docs/rule-dsl-schema.md).
 
 On the current Layer 4 connection path, only `client.ip` and `client.port`
 are populated (`client.port` as a string, so the string operators apply). The
