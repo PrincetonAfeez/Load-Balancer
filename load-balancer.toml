@@ -1,0 +1,67 @@
+[listener]
+host = "127.0.0.1"
+port = 8080
+
+# Reload-safe: balancer (except pid_file), health, timeouts, metrics flush/
+# snapshot/batch, rules, backends. Restart-only: listener/control addresses,
+# metrics database_path and queue_size.
+
+[balancer]
+strategy = "round_robin"
+drain_timeout_seconds = 10
+pid_file = "load-balancer.pid"
+virtual_nodes_per_weight = 64
+# 0 = unlimited; caps simultaneous client connections (reject when full)
+max_connections = 0
+
+[health]
+interval_seconds = 2
+timeout_seconds = 1
+failures_to_unhealthy = 3
+successes_to_healthy = 2
+
+[timeouts]
+connect_seconds = 2
+idle_seconds = 60
+
+[metrics]
+database_path = "load-balancer.db"
+flush_interval_seconds = 0.5
+snapshot_interval_seconds = 5
+queue_size = 10000
+batch_size = 250
+
+[control]
+host = "127.0.0.1"
+port = 9900
+max_frame_bytes = 65536
+max_clock_skew_seconds = 30
+
+[crypto]
+secret_file = "admin.secret"
+
+[rules]
+source = 'return "default"'
+max_instructions = 256
+
+[[backends]]
+name = "echo-1"
+host = "127.0.0.1"
+port = 9001
+weight = 2
+tags = ["stable"]
+
+[[backends]]
+name = "echo-2"
+host = "127.0.0.1"
+port = 9002
+weight = 1
+tags = ["stable"]
+
+[[backends]]
+name = "echo-3"
+host = "127.0.0.1"
+port = 9003
+weight = 1
+tags = ["canary"]
+
