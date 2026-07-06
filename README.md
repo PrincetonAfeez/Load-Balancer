@@ -407,9 +407,11 @@ backend drain state; see per-backend `state` in the backends list).
 ## Tests
 
 The application code has no third-party runtime dependencies. The test suite
-(191 tests) uses `unittest` and `pytest` with real asyncio TCP integration
-cases. Configuration lives in `pyproject.toml`; dev dependencies are in
-`requirements-dev.txt`.
+uses `unittest` and `pytest` with real asyncio TCP integration cases and
+includes unit, failure-path, network integration, daemon/control, reload,
+persistence, concurrency, and graceful-shutdown coverage. Configuration lives
+in `pyproject.toml`; dev dependencies are in `requirements-dev.txt` (unpinned)
+and `requirements-dev.lock` (pinned for CI).
 
 ```powershell
 python -W error::ResourceWarning -m unittest discover -s tests -v

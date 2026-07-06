@@ -82,16 +82,25 @@ Instruction
 
 | Opcode | `arg` |
 |--------|-------|
-| `LOAD_FIELD` | dotted field name string |
-| `LOAD_CONST` | string, boolean, number, or `null` as produced by the compiler |
-| `EQ` | `null` |
-| `STARTSWITH` | `null` |
-| `CONTAINS` | `null` |
-| `AND` | `null` |
-| `OR` | `null` |
+| `LOAD_FIELD` | dotted field-name string |
+| `LOAD_CONST` | string or null from the current DSL compiler; arbitrary values are possible in manually authored VM programs |
+| `EQ` | null |
+| `STARTSWITH` | null |
+| `CONTAINS` | null |
+| `AND` | null |
+| `OR` | null |
 | `JUMP_IF_FALSE` | integer instruction index |
-| `JUMP` | `null` or integer instruction index (reserved; compiler uses `JUMP_IF_FALSE`) |
-| `RETURN` | `null` |
+| `JUMP` | integer instruction index |
+| `RETURN` | null |
+
+The current DSL compiler does not emit `JUMP`, but the VM supports it for
+manually constructed bytecode and tests. Its argument must still be a valid
+integer instruction index.
+
+The current source grammar contains only quoted string literals. Therefore,
+compiler-generated `LOAD_CONST` instructions contain strings, except for null
+used as the fallback result of an else-less rule. The VM itself accepts
+arbitrary constant values in manually authored `Instruction` objects.
 
 Complete opcode set (`OpCode`):
 
@@ -100,9 +109,12 @@ Complete opcode set (`OpCode`):
 
 ## Runtime semantics notes
 
-- `EQ` compares the two stack values with `==`.
-- `STARTSWITH` requires both operands to be strings.
-- `CONTAINS` checks substring membership for strings and element membership for
-  list-like left-hand values; other type combinations yield `false`.
-- Missing fields loaded by `LOAD_FIELD` become `null` and normally make
-  comparisons false.
+- `EQ` compares the two stack values using `==`.
+- `STARTSWITH` evaluates to true only when both operands are strings and the
+  left operand starts with the right operand.
+- `CONTAINS` performs substring membership for strings and element membership
+  for lists. Other operand combinations evaluate to false.
+- `LOAD_FIELD` returns null for a missing path.
+- `JUMP` and `JUMP_IF_FALSE` require an in-range integer instruction target.
+- The current DSL compiler emits string constants and null only; manually
+  constructed VM programs may use additional constant types.
