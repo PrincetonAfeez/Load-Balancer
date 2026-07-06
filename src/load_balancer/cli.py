@@ -46,14 +46,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="logging level for foreground daemon and detached child (default: INFO)",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("init-db", help="initialize the SQLite schema")
-    secret = subparsers.add_parser("init-secret", help="create an admin secret")
+    subparsers.add_parser(
+        "init-db",
+        help="initialize the SQLite schema",
+        description="Create or migrate the metrics database schema on disk.",
+    )
+    secret = subparsers.add_parser(
+        "init-secret",
+        help="create an admin secret",
+        description="Write a new HMAC admin secret to the configured secret file.",
+    )
     secret.add_argument("--force", action="store_true", help="replace existing secret")
 
-    start = subparsers.add_parser("start", help="start the load balancer")
+    start = subparsers.add_parser(
+        "start",
+        help="start the load balancer",
+        description="Run the daemon in the foreground or spawn a detached process.",
+    )
     mode = start.add_mutually_exclusive_group(required=True)
     mode.add_argument(
         "--foreground", action="store_true", help="run attached to this terminal"
@@ -61,62 +74,204 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--daemon", action="store_true", help="spawn a detached background process"
     )
-    subparsers.add_parser("stop", help="gracefully stop the daemon")
-    subparsers.add_parser("reload", help="transactionally reload the config")
-    subparsers.add_parser("status", help="show live daemon status")
-
-    backends = subparsers.add_parser("backends", help="manage runtime backends")
-    backend_sub = backends.add_subparsers(dest="backend_command", required=True)
-    backend_sub.add_parser("list", help="list backends")
-    add = backend_sub.add_parser("add", help="add a runtime backend")
-    add.add_argument("name")
-    add.add_argument("host")
-    add.add_argument("port", type=int)
-    add.add_argument("--weight", type=int, default=1)
-    add.add_argument("--tag", action="append", default=[])
-    for action in ("remove", "enable", "disable", "drain"):
-        action_parser = backend_sub.add_parser(action)
-        action_parser.add_argument("backend_id")
-
-    strategy = subparsers.add_parser("strategy", help="inspect/change strategy")
-    strategy_sub = strategy.add_subparsers(dest="strategy_command", required=True)
-    strategy_sub.add_parser("get")
-    strategy_set = strategy_sub.add_parser("set")
-    strategy_set.add_argument("name", choices=sorted(STRATEGIES))
-
-    metrics = subparsers.add_parser("metrics", help="query persisted metrics")
-    metrics_sub = metrics.add_subparsers(dest="metrics_command", required=True)
-    metrics_sub.add_parser("summary")
-    history = metrics_sub.add_parser("health-history")
-    history.add_argument("--limit", type=int, default=50)
-    routing = metrics_sub.add_parser("routing-history")
-    routing.add_argument("--limit", type=int, default=50)
-
-    config = subparsers.add_parser("config", help="configuration utilities")
-    config_sub = config.add_subparsers(dest="config_command", required=True)
-    config_sub.add_parser("validate")
-
-    dummy = subparsers.add_parser("dummy-backend", help="run a local test backend")
-    dummy.add_argument(
-        "mode", choices=["echo", "slow", "flaky", "close-immediately"]
+    subparsers.add_parser(
+        "stop",
+        help="gracefully stop the daemon",
+        description="Request graceful shutdown through the admin control socket.",
     )
-    dummy.add_argument("--host", default="127.0.0.1")
-    dummy.add_argument("--port", type=int, required=True)
-    dummy.add_argument("--name")
-    dummy.add_argument("--delay-ms", type=int, default=500)
-    dummy.add_argument("--fail-rate", type=float, default=0.3)
+    subparsers.add_parser(
+        "reload",
+        help="transactionally reload the config",
+        description="Parse load-balancer.toml and apply a transactional in-memory reload.",
+    )
+    subparsers.add_parser(
+        "status",
+        help="show live daemon status",
+        description="Query runtime status, backends, and metrics from the daemon.",
+    )
 
-    client = subparsers.add_parser("lb-client", help="send traffic through a balancer")
+    backends = subparsers.add_parser(
+        "backends",
+        help="manage runtime backends",
+        description="Inspect or mutate backend pool state through the admin socket.",
+    )
+    backend_sub = backends.add_subparsers(dest="backend_command", required=True)
+    backend_sub.add_parser(
+        "list",
+        help="list configured and runtime backends",
+        description="List all current backends and their runtime state.",
+    )
+    add = backend_sub.add_parser(
+        "add",
+        help="add a runtime backend",
+        description="Register a new backend in the running daemon until the next reload.",
+    )
+    add.add_argument("name", help="backend display name")
+    add.add_argument("host", help="backend host address")
+    add.add_argument("port", type=int, help="backend TCP port")
+    add.add_argument("--weight", type=int, default=1, help="selection weight (default: 1)")
+    add.add_argument(
+        "--tag",
+        action="append",
+        default=[],
+        help="optional tag (repeatable)",
+    )
+    backend_help = {
+        "remove": (
+            "remove a runtime backend",
+            "Remove a backend from the pool; lingering connections drain first.",
+        ),
+        "enable": (
+            "enable a backend for new traffic",
+            "Mark a backend eligible for new selections again.",
+        ),
+        "disable": (
+            "disable a backend from new traffic",
+            "Exclude a backend from new selections without dropping active connections.",
+        ),
+        "drain": (
+            "drain a backend gracefully",
+            "Stop selecting a backend for new connections while existing ones finish.",
+        ),
+    }
+    for action, (help_text, description) in backend_help.items():
+        action_parser = backend_sub.add_parser(
+            action, help=help_text, description=description
+        )
+        action_parser.add_argument(
+            "backend_id", help="backend identifier from status or backends list"
+        )
+
+    strategy = subparsers.add_parser(
+        "strategy",
+        help="inspect or change strategy",
+        description="Read or change the active balancing strategy at runtime.",
+    )
+    strategy_sub = strategy.add_subparsers(dest="strategy_command", required=True)
+    strategy_sub.add_parser(
+        "get",
+        help="show the active and configured strategy",
+        description="Show active strategy, configured strategy, and rule source.",
+    )
+    strategy_set = strategy_sub.add_parser(
+        "set",
+        help="change the active strategy",
+        description="Set the runtime strategy until the next reload.",
+    )
+    strategy_set.add_argument(
+        "name",
+        choices=sorted(STRATEGIES),
+        help="balancing strategy name",
+    )
+
+    metrics = subparsers.add_parser(
+        "metrics",
+        help="query persisted metrics",
+        description="Read historical metrics and events from SQLite.",
+    )
+    metrics_sub = metrics.add_subparsers(dest="metrics_command", required=True)
+    metrics_sub.add_parser(
+        "summary",
+        help="show the most recent persisted metrics snapshot",
+        description="Print the latest metrics snapshot stored in SQLite.",
+    )
+    history = metrics_sub.add_parser(
+        "health-history",
+        help="show recent backend health transitions",
+        description="List recent health check transitions from SQLite.",
+    )
+    history.add_argument(
+        "--limit", type=int, default=50, help="maximum rows to return (default: 50)"
+    )
+    routing = metrics_sub.add_parser(
+        "routing-history",
+        help="show recent routing/connection events",
+        description="List recent connection routing events from SQLite.",
+    )
+    routing.add_argument(
+        "--limit", type=int, default=50, help="maximum rows to return (default: 50)"
+    )
+
+    config = subparsers.add_parser(
+        "config",
+        help="configuration utilities",
+        description="Validate configuration without starting the daemon.",
+    )
+    config_sub = config.add_subparsers(dest="config_command", required=True)
+    config_sub.add_parser(
+        "validate",
+        help="parse and validate the TOML config",
+        description="Load, type-check, and compile rules from the config file.",
+    )
+
+    dummy = subparsers.add_parser(
+        "dummy-backend",
+        help="run a local test backend",
+        description="Start a standalone echo/slow/flaky test backend for local demos.",
+    )
+    dummy.add_argument(
+        "mode",
+        choices=["echo", "slow", "flaky", "close-immediately"],
+        help="backend behavior mode",
+    )
+    dummy.add_argument(
+        "--host", default="127.0.0.1", help="listen address (default: 127.0.0.1)"
+    )
+    dummy.add_argument("--port", type=int, required=True, help="listen port")
+    dummy.add_argument("--name", help="optional label printed in logs")
+    dummy.add_argument(
+        "--delay-ms",
+        type=int,
+        default=500,
+        help="slow-mode response delay in milliseconds (default: 500)",
+    )
+    dummy.add_argument(
+        "--fail-rate",
+        type=float,
+        default=0.3,
+        help="flaky-mode close probability from 0.0 to 1.0 (default: 0.3)",
+    )
+
+    client = subparsers.add_parser(
+        "lb-client",
+        help="send traffic through a balancer",
+        description="Generate test traffic against a running load balancer.",
+    )
     client_sub = client.add_subparsers(dest="client_command", required=True)
-    send = client_sub.add_parser("send")
-    send.add_argument("--host", default="127.0.0.1")
-    send.add_argument("--port", type=int, default=8080)
-    send.add_argument("--message", default="hello")
-    send.add_argument("--count", type=int, default=1)
-    held = client_sub.add_parser("hold-open")
-    held.add_argument("--host", default="127.0.0.1")
-    held.add_argument("--port", type=int, default=8080)
-    held.add_argument("--seconds", type=float, default=60)
+    send = client_sub.add_parser(
+        "send",
+        help="send one or more messages through the balancer",
+        description="Open TCP connections, send payloads, and print echoed replies.",
+    )
+    send.add_argument(
+        "--host", default="127.0.0.1", help="balancer host (default: 127.0.0.1)"
+    )
+    send.add_argument(
+        "--port", type=int, default=8080, help="balancer port (default: 8080)"
+    )
+    send.add_argument(
+        "--message", default="hello", help="payload to send (default: hello)"
+    )
+    send.add_argument(
+        "--count", type=int, default=1, help="number of connections (default: 1)"
+    )
+    held = client_sub.add_parser(
+        "hold-open",
+        help="keep a connection open for a duration",
+        description="Hold one client connection open to test concurrency or drain.",
+    )
+    held.add_argument(
+        "--host", default="127.0.0.1", help="balancer host (default: 127.0.0.1)"
+    )
+    held.add_argument(
+        "--port", type=int, default=8080, help="balancer port (default: 8080)"
+    )
+    held.add_argument(
+        "--seconds",
+        type=float,
+        default=60,
+        help="seconds to keep the connection open (default: 60)",
+    )
     return parser
 
 

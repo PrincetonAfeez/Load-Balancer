@@ -1,9 +1,17 @@
-# Editable install plus lint, type-check, and test tooling.
-# Install from the repository root:
+# Editable install plus unpinned dev tooling (matches pyproject.toml [dev]).
+# Use this for day-to-day development when you want compatible latest versions:
 #   python -m pip install -r requirements-dev.txt
 #
 # Equivalent:
 #   python -m pip install -e ".[dev]"
+#
+# Reproducible installs (CI and release verification) use the lock file instead:
+#   python -m pip install -e .
+#   python -m pip install -r requirements-dev.lock
+#
+# Regenerate the lock file after changing dev dependency ranges in pyproject.toml:
+#   python -m pip install pip-tools
+#   pip-compile --extra dev pyproject.toml -o requirements-dev.lock
 
 -e .
 mypy>=1.8
