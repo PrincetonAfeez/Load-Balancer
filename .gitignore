@@ -1,0 +1,44 @@
+# Bytecode and packaging
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Test, lint, and type-check caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Runtime artifacts (local dev)
+*.db
+*.db-shm
+*.db-wal
+*.pid
+admin.secret
+secret.txt
+*.secret
+
+# Local environment overrides
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*~
